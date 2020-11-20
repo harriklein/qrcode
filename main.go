@@ -1,84 +1,122 @@
+// Package main must be converted to "package p" when migrate to HTTP Cloud Function.
 package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"image/jpeg"
 	"image/png"
 	"io"
-	"net/http"
 	"os/exec"
+	"strconv"
+	"strings"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
+
+	"net/http" // Remove it for GCP, only needed to publish it locally (localhost:8080)
 )
 
+// main for local test purpose. Publish QRCodeGenerator fucntion on localhost:8080
 func main() {
-	http.HandleFunc("/", viewCodeHandler)
-	http.ListenAndServe(":8888", nil)
+	http.HandleFunc("/", QRCodeGenerator)
+	http.ListenAndServe(":8080", nil)
 }
 
-func viewCodeHandler(w http.ResponseWriter, r *http.Request) {
+// setupResponse adds CORS Headers
+func setupResponse(w *http.ResponseWriter, req *http.Request) {
+	(*w).Header().Set("Access-Control-Allow-Origin", "*")
+	(*w).Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	(*w).Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, api_key, Authorization")
+}
 
-	var d struct {
-		Message     string `json:"message"`
-		ImageType   string `json:"imageType"`
-		ImageWidth  int    `json:"imageWidth"`
-		ImageHeight int    `json:"imageHeight"`
+// QRCodeGenerator generates QRCode
+func QRCodeGenerator(w http.ResponseWriter, r *http.Request) {
+
+	setupResponse(&w, r)
+
+	// Variable to store errors
+	var err error
+
+	// region Get params ---------------------------------------
+	params := r.URL.Query()
+	dataString := params.Get("text")
+	imageType := strings.ToLower(params.Get("type"))
+	imageSize := strings.ToLower(params.Get("size"))
+	errorCorrectionLevel := strings.ToUpper(params.Get("ecl"))
+	// endregion -----------------------------------------------
+
+	// region Check and split Size into Width and Height. ------
+	// Default: without resize it.
+	imageSizeA := strings.Split(imageSize, "x")
+	imageWidth := 0
+	imageHeight := 0
+	if len(imageSizeA) > 0 {
+		imageWidth, _ = strconv.Atoi(imageSizeA[0])
+	}
+	if len(imageSizeA) > 1 {
+		imageHeight, _ = strconv.Atoi(imageSizeA[1])
+	}
+	if imageWidth < 0 {
+		imageWidth = 0
+	}
+	if imageHeight < 0 {
+		imageHeight = 0
+	}
+	// endregion -----------------------------------------------
+
+	// region Check ErrorCorrectionLevel -----------------------
+	// Default: M
+	qrLvl := qr.M
+	switch errorCorrectionLevel {
+	case "L": // L recovers 7% of data
+		qrLvl = qr.L
+	case "M": // M recovers 15% of data
+		qrLvl = qr.M
+	case "Q": // Q recovers 25% of data
+		qrLvl = qr.Q
+	case "H": // H recovers 30% of data
+		qrLvl = qr.H
+	}
+	// endregion -----------------------------------------------
+
+	// Encode QRCode
+	qrCode, _ := qr.Encode(dataString, qrLvl, qr.Auto)
+
+	// Resize QRCode, if requested
+	if imageWidth > 0 || imageHeight > 0 {
+		if qrCode, err = barcode.Scale(qrCode, imageWidth, imageHeight); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, "qr.Scale() failed: %s\n", err)
+			return
+		}
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "json.Decoder() failed with %s\n", err)
-		return
-	}
+	switch imageType {
+	case "pcl":
+		var inBuf, outBuf bytes.Buffer
 
-	dataString := d.Message
-	imageType := d.ImageType
-	imageWidth := d.ImageWidth
-	imageHeight := d.ImageHeight
-
-	if dataString == "" {
-		dataString = "QRCode!"
-	}
-	if imageWidth < 1 {
-		imageWidth = 512
-	}
-	if imageHeight < 1 {
-		imageHeight = 512
-	}
-	if (imageType != "pcl") && (imageType != "jpg") && (imageType != "jpeg") {
-		imageType = "png"
-	}
-
-	qrCode, _ := qr.Encode(dataString, qr.L, qr.Auto)
-	qrCode, _ = barcode.Scale(qrCode, imageWidth, imageHeight)
-
-	if imageType == "png" {
-		png.Encode(w, qrCode)
-	} else if (imageType == "jpg") || (imageType == "jpeg") {
-		jpeg.Encode(w, qrCode, nil)
-	} else {
-		var b bytes.Buffer
-		var bOut bytes.Buffer
-
-		if err := png.Encode(&b, qrCode); err != nil {
+		if err = png.Encode(&inBuf, qrCode); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "png.Encode() failed with %s\n", err)
+			fmt.Fprintf(w, "png.Encode() failed: %s\n", err)
 			return
 		}
 
 		// Use - as input and output to use stdin and stdout.
 		cmd := exec.Command("convert", "-", "-monochrome", "pcl:-")
-		cmd.Stdin = bytes.NewReader(b.Bytes())
-		cmd.Stdout = &bOut
-		err := cmd.Run()
-		if err != nil {
+		cmd.Stdin = bytes.NewReader(inBuf.Bytes())
+		cmd.Stdout = &outBuf
+
+		if err = cmd.Run(); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			fmt.Fprintf(w, "cmd.Run() failed with %s\n", err)
+			fmt.Fprintf(w, "cmd.Run() failed:  %s\n", err)
 			return
 		}
-		io.Copy(w, bytes.NewReader(bOut.Bytes()))
+		io.Copy(w, bytes.NewReader(outBuf.Bytes()))
+	case "jpg", "jpeg":
+		jpeg.Encode(w, qrCode, nil)
+	default:
+		png.Encode(w, qrCode)
 	}
+
 }
