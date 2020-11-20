@@ -1,4 +1,3 @@
-// Package main must be converted to "package p" when migrate to HTTP Cloud Function.
 package main
 
 import (
@@ -7,20 +6,26 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"log"
+	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
-
-	"net/http" // Remove it for GCP, only needed to publish it locally (localhost:8080)
 )
 
-// main for local test purpose. Publish QRCodeGenerator fucntion on localhost:8080
 func main() {
-	http.HandleFunc("/", QRCodeGenerator)
-	http.ListenAndServe(":8080", nil)
+	customHandlerPort, exists := os.LookupEnv("FUNCTIONS_CUSTOMHANDLER_PORT")
+	if !exists {
+		customHandlerPort = "8080"
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/qrcodegen", QRCodeGenerator)
+	fmt.Println("Go server Listening on: ", customHandlerPort)
+	log.Fatal(http.ListenAndServe(":"+customHandlerPort, mux))
 }
 
 // setupResponse adds CORS Headers
